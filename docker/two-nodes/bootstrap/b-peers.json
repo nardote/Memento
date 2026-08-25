@@ -1,0 +1,3 @@
+[
+  {"name": "memento-a", "url": "http://memento-a:7337", "token_file": "/secrets/a-peer-b.token", "allow_insecure_http": true}
+]

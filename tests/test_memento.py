@@ -140,6 +140,18 @@ class MementoTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             memento.add_peer(self.root, "unsafe", "http://example.com:7337", str(token_file))
 
+    def test_insecure_http_peer_requires_explicit_opt_in(self):
+        token_file = Path(self.temp.name) / "peer.token"
+        token_file.write_text("x" * 32)
+        peer = memento.add_peer(self.root, "docker-demo", "http://memento-a:7337", str(token_file), allow_insecure_http=True)
+        self.assertTrue(peer["insecure_http"])
+
+    def test_cli_accepts_local_task_approval(self):
+        parser = memento.parser()
+        args = parser.parse_args(["tasks", "approve", "task_example", "--root", str(self.root)])
+        self.assertEqual(args.task_command, "approve")
+        self.assertEqual(args.task_id, "task_example")
+
 
 if __name__ == "__main__":
     unittest.main()

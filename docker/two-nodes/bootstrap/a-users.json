@@ -1,0 +1,4 @@
+[
+  {"username": "admin-a", "role": "admin", "projects": "*", "token_file": "/secrets/a-admin.token"},
+  {"username": "peer-b", "role": "reader", "projects": "equipo", "token_file": "/secrets/a-peer-b.token"}
+]

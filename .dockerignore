@@ -1,0 +1,12 @@
+.git
+.memory
+.memento-token
+.memento-docker-secrets
+__pycache__
+*.pyc
+tests
+skills
+README.md
+install.sh
+run-mcp-local.sh
+run-public.sh

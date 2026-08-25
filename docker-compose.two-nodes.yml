@@ -1,0 +1,34 @@
+services:
+  memento-a:
+    build: .
+    environment:
+      MEMENTO_ROOT: /data
+      MEMENTO_NODE_ID: memento-a
+      MEMENTO_BOOTSTRAP_USERS_FILE: /bootstrap/a-users.json
+      MEMENTO_BOOTSTRAP_PEERS_FILE: /bootstrap/a-peers.json
+      MEMENTO_PEER_SYNC_INTERVAL: "3"
+    ports:
+      - "127.0.0.1:8781:7337"
+    volumes:
+      - memento-a-data:/data
+      - ./docker/two-nodes/bootstrap:/bootstrap:ro
+      - ./.memento-docker-secrets:/secrets:ro
+
+  memento-b:
+    build: .
+    environment:
+      MEMENTO_ROOT: /data
+      MEMENTO_NODE_ID: memento-b
+      MEMENTO_BOOTSTRAP_USERS_FILE: /bootstrap/b-users.json
+      MEMENTO_BOOTSTRAP_PEERS_FILE: /bootstrap/b-peers.json
+      MEMENTO_PEER_SYNC_INTERVAL: "3"
+    ports:
+      - "127.0.0.1:8782:7337"
+    volumes:
+      - memento-b-data:/data
+      - ./docker/two-nodes/bootstrap:/bootstrap:ro
+      - ./.memento-docker-secrets:/secrets:ro
+
+volumes:
+  memento-a-data:
+  memento-b-data:
