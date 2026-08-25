@@ -1,0 +1,7 @@
+interface:
+  display_name: "Memento Checkpoints"
+  short_description: "Ofrece guardar hitos importantes en Memento"
+  default_prompt: "Usá $memento-checkpoint para consultar contexto y ofrecer checkpoints durante el trabajo."
+
+policy:
+  allow_implicit_invocation: true
