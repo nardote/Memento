@@ -1,0 +1,8 @@
+.conversation { margin-top: 1rem; }
+.conversation > p { color: var(--muted); font-size: .88rem; line-height: 1.5; }
+.conversation-actions { margin-top: .65rem; }
+.action-link { padding: .3rem 0; text-align: left; }
+.message-card { border-left: 2px solid var(--accent); margin-top: .75rem; padding: .15rem 0 .15rem .75rem; }
+.message-card p { color: #c9ddd5; font-size: .88rem; line-height: 1.45; margin: .3rem 0; }
+.message-card small { color: var(--muted); font: .7rem ui-monospace, SFMono-Regular, Menlo, monospace; }
+.reply { margin-top: 1rem; }

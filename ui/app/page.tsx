@@ -4,7 +4,8 @@ import { FormEvent, useMemo, useState } from 'react';
 
 type NodeKey = 'a' | 'b';
 type NodeConfig = { name: string; url: string; token: string; status: 'unknown' | 'online' | 'offline' };
-type Json = Record<string, unknown>;
+type Task = { task_id: string; spec: { creator: string; executor: string; project: string; action: { title?: string; message?: string; request_kind?: string } }; approved?: boolean };
+type Event = { event_id: string; title: string; content: string; tags: string[]; occurred_at: string; actor?: string };
 
 const initialNodes: Record<NodeKey, NodeConfig> = {
   a: { name: 'Memento A', url: 'http://127.0.0.1:8781', token: '', status: 'unknown' },
@@ -20,8 +21,13 @@ export default function Home() {
   const [action, setAction] = useState('');
   const [details, setDetails] = useState('');
   const [tags, setTags] = useState('');
-  const [output, setOutput] = useState<Json | Json[] | string | null>(null);
+  const [output, setOutput] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
+  const [requestMessage, setRequestMessage] = useState('');
+  const [replyTaskId, setReplyTaskId] = useState('');
+  const [replyDetails, setReplyDetails] = useState('');
+  const [requests, setRequests] = useState<Task[]>([]);
+  const [responses, setResponses] = useState<Event[]>([]);
   const active = nodes[selected];
   const hasToken = useMemo(() => active.token.trim().length > 0, [active.token]);
 
@@ -36,7 +42,7 @@ export default function Home() {
     } catch { updateNode(key, { status: 'offline' }); }
   }
 
-  async function call(tool: string, args: Json = {}) {
+  async function call(tool: string, args: Record<string, unknown> = {}) {
     if (!active.token.trim()) { setOutput('Ingresá el token de este nodo antes de ejecutar una acción.'); return; }
     setBusy(true);
     try {
@@ -47,8 +53,11 @@ export default function Home() {
       const payload = await response.json() as { error?: { message?: string }; result?: { content?: Array<{ text?: string }> } };
       if (!response.ok || payload.error) throw new Error(payload.error?.message || `HTTP ${response.status}`);
       const text = payload.result?.content?.[0]?.text ?? '{}';
-      try { setOutput(JSON.parse(text)); } catch { setOutput(text); }
+      let result: unknown = text;
+      try { result = JSON.parse(text); } catch { /* La respuesta puede ser texto. */ }
+      setOutput(result);
       updateNode(selected, { status: 'online' });
+      return result;
     } catch (error) {
       updateNode(selected, { status: 'offline' });
       setOutput(`No se pudo comunicar con ${active.name}: ${error instanceof Error ? error.message : 'error desconocido'}`);
@@ -59,6 +68,37 @@ export default function Home() {
     event.preventDefault();
     await call('activity_add', { project, action, details, tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean) });
     setAction(''); setDetails(''); setTags('');
+  }
+
+  const targetNode = selected === 'a' ? 'memento-b' : 'memento-a';
+
+  async function createRequest(event: FormEvent) {
+    event.preventDefault();
+    const result = await call('task_create', {
+      executor: targetNode,
+      project,
+      trigger: { type: 'at', at: new Date().toISOString() },
+      action: { type: 'notify', title: `Solicitud de información de ${active.name}`, message: requestMessage, request_kind: 'information' },
+      catch_up: 'execute',
+    }) as Task | undefined;
+    if (result?.task_id) setReplyTaskId(result.task_id);
+    setRequestMessage('');
+  }
+
+  async function loadRequests() {
+    const result = await call('task_list', { project });
+    if (Array.isArray(result)) setRequests(result.filter((task): task is Task => typeof task === 'object' && task !== null && (task as Task).spec?.action?.request_kind === 'information'));
+  }
+
+  async function sendReply(event: FormEvent) {
+    event.preventDefault();
+    await call('activity_add', { project, action: `Respuesta a ${replyTaskId.slice(0, 18)}…`, details: replyDetails, tags: [`request:${replyTaskId}`, 'kind:request-response'] });
+    setReplyDetails('');
+  }
+
+  async function loadResponses() {
+    const result = await call('event_list', { project });
+    if (Array.isArray(result)) setResponses(result.filter((item): item is Event => typeof item === 'object' && item !== null && Array.isArray((item as Event).tags) && (item as Event).tags.some((tag) => tag.startsWith('request:'))));
   }
 
   return <main>
@@ -81,6 +121,18 @@ export default function Home() {
         <form className="panel activity-form" onSubmit={addActivity}><div className="section-title"><div><p className="eyebrow">Nueva actividad</p><h2>Registrar información</h2></div></div>
           <label>Acción<input required value={action} onChange={(event) => setAction(event.target.value)} placeholder="Ej.: Hallazgo confirmado" /></label><label>Detalle<textarea required value={details} onChange={(event) => setDetails(event.target.value)} placeholder="Qué cambió, evidencia y próximo paso" rows={4} /></label><label>Tags separados por coma<input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="topic:refunds, ticket:SKY-123" /></label><button disabled={busy} type="submit">{busy ? 'Enviando…' : 'Guardar actividad'}</button>
         </form>
+        <section className="panel conversation">
+          <div className="section-title"><div><p className="eyebrow">Solicitud entre nodos</p><h2>{active.name} solicita información a {targetNode}</h2></div></div>
+          <p>La solicitud se replica, el nodo destinatario la aprueba y luego responde con una actividad vinculada.</p>
+          <form onSubmit={createRequest}><label>¿Qué necesitás saber?<textarea required value={requestMessage} onChange={(event) => setRequestMessage(event.target.value)} placeholder="Ej.: Confirmá el estado del diagnóstico de refunds y compartí la evidencia." rows={3} /></label><button disabled={busy} type="submit">Solicitar a {targetNode}</button></form>
+          <div className="conversation-actions"><button className="ghost action-link" disabled={busy} onClick={loadRequests}>Ver solicitudes de este nodo</button>{requests.map((task) => <article className="message-card" key={task.task_id}><strong>{task.spec.action.title || 'Solicitud'}</strong><p>{task.spec.action.message}</p><small>{task.task_id} · {task.approved ? 'aprobada' : 'pendiente de aprobación'}</small></article>)}</div>
+        </section>
+        <section className="panel conversation reply">
+          <div className="section-title"><div><p className="eyebrow">Respuesta</p><h2>Responder una solicitud</h2></div></div>
+          <p>Elegí el nodo que recibió la solicitud, aprobala y respondé con el mismo ID. La respuesta se sincroniza al otro nodo.</p>
+          <form onSubmit={sendReply}><label>ID de solicitud<input required value={replyTaskId} onChange={(event) => setReplyTaskId(event.target.value)} placeholder="task_…" spellCheck="false" /></label><label>Respuesta<textarea required value={replyDetails} onChange={(event) => setReplyDetails(event.target.value)} placeholder="Respuesta, evidencia y próximos pasos" rows={3} /></label><button disabled={busy} type="submit">Responder desde {active.name}</button></form>
+          <div className="conversation-actions"><button className="ghost action-link" disabled={busy} onClick={loadResponses}>Ver respuestas recibidas</button>{responses.map((response) => <article className="message-card" key={response.event_id}><strong>{response.title}</strong><p>{response.content}</p><small>{response.actor || 'sin autor'} · {response.occurred_at}</small></article>)}</div>
+        </section>
         <div className="panel approval"><p className="eyebrow">Seguridad</p><h2>Aprobar una tarea recibida</h2><p>Consultá las tareas de B y aprobá sólo en el nodo ejecutor.</p><TaskApproval onApprove={(taskId) => call('task_approve', { task_id: taskId })} disabled={busy} /></div>
       </section>
       <aside className="panel output-panel" aria-live="polite"><p className="eyebrow">Respuesta</p><h2>{busy ? 'Procesando…' : 'Último resultado'}</h2><pre>{output === null ? 'Elegí una operación para ver el resultado.' : typeof output === 'string' ? output : pretty(output)}</pre></aside>

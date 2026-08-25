@@ -313,6 +313,12 @@ En el panel pegá el contenido de `../.memento-docker-secrets/a-admin.token`
 para A y el de `b-admin.token` para B. El Compose habilita ese origen local,
 pero no habilita orígenes públicos.
 
+Para pedir información entre nodos, seleccioná A y usá **Solicitud entre
+nodos**. La tarea llega a B, donde debe aprobarse antes de ejecutarse. Luego,
+desde B usá **Responder una solicitud** con el `task_id`: la respuesta se
+guarda como actividad con un tag `request:<task_id>` y se replica como evento
+hacia A. En A, **Ver respuestas recibidas** muestra esas respuestas.
+
 Prueba E2E real con dos procesos, apagado y dos reinicios de B:
 
 ```bash
