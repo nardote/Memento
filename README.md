@@ -290,6 +290,29 @@ docker compose -f docker-compose.two-nodes.yml down
 Para empezar de cero, eliminá explícitamente los volúmenes de Compose y la
 carpeta `.memento-docker-secrets/`.
 
+### Panel web local
+
+Memento Console simplifica las pruebas manuales de los nodos Docker. Permite
+cargar por separado la URL y el token de A y B, consultar actividades, tareas,
+inbox y peers, forzar una sincronización, registrar una actividad y aprobar
+una tarea recibida.
+
+Los tokens nunca se guardan en el proyecto, `localStorage` ni en la imagen: se
+mantienen solamente en memoria hasta que cerrás o recargás la pestaña.
+
+Con los dos nodos levantados, iniciá el panel local:
+
+```bash
+cd ui
+npm install
+npm run dev
+```
+
+Abrí la URL que indique el comando (habitualmente `http://127.0.0.1:3000`).
+En el panel pegá el contenido de `../.memento-docker-secrets/a-admin.token`
+para A y el de `b-admin.token` para B. El Compose habilita ese origen local,
+pero no habilita orígenes públicos.
+
 Prueba E2E real con dos procesos, apagado y dos reinicios de B:
 
 ```bash

@@ -751,6 +751,15 @@ def serve_http(root: Path, host: str, port: int, allowed_origins: set[str]) -> N
     class Handler(BaseHTTPRequestHandler):
         server_version = "Memento/" + VERSION
 
+        def end_headers(self) -> None:
+            origin = self.headers.get("Origin")
+            if origin and origin in allowed_origins:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Vary", "Origin")
+            super().end_headers()
+
         def send_json(self, status: int, value: Any) -> None:
             body = json.dumps(value, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
@@ -816,6 +825,14 @@ def serve_http(root: Path, host: str, port: int, allowed_origins: set[str]) -> N
                 self.send_json(400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": str(exc)}})
             except Exception as exc:
                 self.send_json(500, {"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": str(exc)}})
+
+        def do_OPTIONS(self) -> None:
+            if not self.valid_origin():
+                self.send_json(403, {"error": "origin_forbidden"})
+                return
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def log_message(self, fmt: str, *args: Any) -> None:
             print(f"http {self.address_string()} {fmt % args}", file=sys.stderr)
