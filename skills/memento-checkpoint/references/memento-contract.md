@@ -61,3 +61,14 @@ Useful tags:
 Do not invent a project the authenticated user may not access. If the intended
 project is unclear and materially changes who can read the activity, ask the
 user before proposing the write.
+
+## Replicated tasks
+
+The task workflow uses `task_create` on the creator, `task_import` and
+`task_approve` on the executor, and `task_run_due` whenever the executor starts
+or synchronizes. Use `event_list` and `event_import` to transfer durable trigger
+events. Read notifications through `inbox_list` and acknowledge them with
+`inbox_ack`.
+
+Supported triggers are `event` and `at`. The only supported action is `notify`.
+Do not propose arbitrary shell or HTTP execution.

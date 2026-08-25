@@ -29,6 +29,9 @@ memento delete ID
 memento doctor
 memento mcp
 memento serve-http
+memento node show|set
+memento tasks list|run
+memento inbox list|ack
 ```
 
 Si se omite `--content`, `save` lee el contenido desde stdin.
@@ -138,6 +141,52 @@ Roles:
 `activity_add` toma la identidad exclusivamente del token autenticado. Las
 actividades son archivos Markdown inmutables y cada alta se registra además en
 `audit/YYYY-MM.jsonl`. Los permisos se comprueban por proyecto.
+
+## Tareas replicadas entre nodos
+
+Cada nodo tiene un ID estable:
+
+```bash
+./memento node set memento-adrian --root .memory
+./memento node show --root .memory
+```
+
+Una tarea contiene una especificación inmutable y su ID es el SHA-256 del JSON
+canónico. Modificar cualquier campo cambia el ID y los imports con hash
+incorrecto se rechazan. El estado queda separado en approvals, cancellations,
+receipts e inbox.
+
+Triggers disponibles en el MVP:
+
+```json
+{"type":"event","filters":{"tags_all":["ticket:SKY-1234"]}}
+{"type":"at","at":"2026-08-26T09:00:00-03:00"}
+```
+
+La única acción ejecutable es segura y declarativa:
+
+```json
+{"type":"notify","title":"Nueva información","message":"Revisar SKY-1234"}
+```
+
+Herramientas MCP:
+
+- `task_create`, `task_import`, `task_approve`, `task_list`, `task_cancel`
+- `task_run_due`
+- `event_list`, `event_import`
+- `inbox_list`, `inbox_ack`
+
+Al volver online, el nodo recibe tareas y eventos faltantes, aprueba las tareas
+dirigidas a él y ejecuta:
+
+```bash
+./memento tasks run --root .memory
+./memento inbox list --root .memory
+```
+
+Cada combinación de tarea e instancia del trigger produce un `execution_id`
+determinista. Los receipts hacen que una segunda evaluación no duplique la
+notificación.
 
 ## Sincronización
 

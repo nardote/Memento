@@ -206,6 +206,258 @@ def audit(root: Path, actor: str, action: str, project: str | None, details: dic
         stream.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def content_id(prefix: str, value: Any) -> str:
+    digest = hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+    return f"{prefix}_{digest}"
+
+
+def task_dirs(root: Path) -> dict[str, Path]:
+    directories = {
+        "specs": root / "tasks" / "specs",
+        "approvals": root / "tasks" / "approvals",
+        "cancellations": root / "tasks" / "cancellations",
+        "receipts": root / "tasks" / "receipts",
+        "events": root / "events",
+        "inbox": root / "inbox",
+        "acknowledged": root / "inbox" / "acknowledged",
+    }
+    for directory in directories.values():
+        directory.mkdir(parents=True, exist_ok=True)
+    return directories
+
+
+def node_id(root: Path) -> str:
+    locate_root(str(root), create=True)
+    config_path = root / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if not config.get("node_id"):
+        config["node_id"] = "node-" + secrets.token_hex(8)
+        config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return config["node_id"]
+
+
+def set_node_id(root: Path, value: str) -> None:
+    if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", value):
+        raise ValueError("node_id inválido")
+    locate_root(str(root), create=True)
+    config_path = root / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["node_id"] = value
+    config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def write_once(path: Path, value: Any) -> bool:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(encoded)
+    return True
+
+
+def create_task(root: Path, creator: str, executor: str, project: str, trigger: dict[str, Any], action: dict[str, Any], catch_up: str = "execute", created_at: str | None = None) -> dict[str, Any]:
+    if trigger.get("type") not in ("event", "at"):
+        raise ValueError("trigger soportado: event o at")
+    if action.get("type") != "notify":
+        raise ValueError("acción soportada: notify")
+    if catch_up not in ("execute", "skip", "expire"):
+        raise ValueError("catch_up inválido")
+    spec = {
+        "version": 1,
+        "creator": creator,
+        "executor": executor,
+        "project": project,
+        "trigger": trigger,
+        "action": action,
+        "catch_up": catch_up,
+        "created_at": created_at or dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    task_id = content_id("task", spec)
+    envelope = {"task_id": task_id, "spec": spec}
+    write_once(task_dirs(root)["specs"] / f"{task_id}.json", envelope)
+    return envelope
+
+
+def import_task(root: Path, envelope: dict[str, Any]) -> dict[str, Any]:
+    spec = envelope.get("spec", {})
+    expected = content_id("task", spec)
+    if envelope.get("task_id") != expected:
+        raise ValueError("hash de tarea inválido")
+    if spec.get("trigger", {}).get("type") not in ("event", "at") or spec.get("action", {}).get("type") != "notify":
+        raise ValueError("tarea contiene trigger o acción no soportada")
+    created = write_once(task_dirs(root)["specs"] / f"{expected}.json", envelope)
+    return {"task_id": expected, "imported": created, "status": "pending_approval"}
+
+
+def load_tasks(root: Path) -> list[dict[str, Any]]:
+    result = []
+    for path in task_dirs(root)["specs"].glob("task_*.json"):
+        try:
+            envelope = json.loads(path.read_text(encoding="utf-8"))
+            if envelope.get("task_id") == content_id("task", envelope.get("spec", {})):
+                result.append(envelope)
+        except (OSError, json.JSONDecodeError):
+            continue
+    result.sort(key=lambda item: item["spec"].get("created_at", ""))
+    return result
+
+
+def approve_task(root: Path, task_id: str, actor: str) -> bool:
+    if not (task_dirs(root)["specs"] / f"{task_id}.json").exists():
+        raise ValueError("tarea no encontrada")
+    approval = {"task_id": task_id, "approved_by": actor, "approved_at": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
+    return write_once(task_dirs(root)["approvals"] / f"{task_id}.json", approval)
+
+
+def cancel_task(root: Path, task_id: str, actor: str) -> bool:
+    cancellation = {"task_id": task_id, "cancelled_by": actor, "cancelled_at": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
+    return write_once(task_dirs(root)["cancellations"] / f"{task_id}.json", cancellation)
+
+
+def record_event(root: Path, activity: dict[str, Any]) -> dict[str, Any]:
+    event = {
+        "event_id": "event_" + activity["id"],
+        "project": activity["project"],
+        "activity_id": activity["id"],
+        "occurred_at": activity["created_at"],
+        "title": activity["title"],
+        "content": activity["content"],
+        "tags": activity.get("tags", []),
+        "actor": activity.get("author"),
+    }
+    write_once(task_dirs(root)["events"] / f"{event['event_id']}.json", event)
+    return event
+
+
+def load_events(root: Path) -> list[dict[str, Any]]:
+    events = []
+    for path in task_dirs(root)["events"].glob("event_*.json"):
+        try:
+            events.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    events.sort(key=lambda event: event.get("occurred_at", ""))
+    return events
+
+
+def import_event(root: Path, event: dict[str, Any]) -> bool:
+    event_id = event.get("event_id", "")
+    if not re.fullmatch(r"event_[A-Z0-9]{26}", event_id):
+        raise ValueError("event_id inválido")
+    required = ("project", "activity_id", "occurred_at", "title", "content", "tags")
+    if any(key not in event for key in required):
+        raise ValueError("evento incompleto")
+    dt.datetime.fromisoformat(event["occurred_at"])
+    return write_once(task_dirs(root)["events"] / f"{event_id}.json", event)
+
+
+def event_matches(spec: dict[str, Any], event: dict[str, Any]) -> bool:
+    trigger = spec["trigger"]
+    if event.get("project") != spec.get("project"):
+        return False
+    if not trigger.get("include_existing", False) and event.get("occurred_at", "") < spec.get("created_at", ""):
+        return False
+    filters = trigger.get("filters", {})
+    tags = set(event.get("tags", []))
+    if not set(filters.get("tags_all", [])).issubset(tags):
+        return False
+    any_tags = set(filters.get("tags_any", []))
+    if any_tags and not any_tags.intersection(tags):
+        return False
+    text = filters.get("text", "").casefold().strip()
+    haystack = f"{event.get('title', '')} {event.get('content', '')}".casefold()
+    return not text or text in haystack
+
+
+def due_instances(root: Path, envelope: dict[str, Any], now: dt.datetime) -> list[dict[str, Any]]:
+    spec = envelope["spec"]
+    trigger = spec["trigger"]
+    if trigger["type"] == "event":
+        result = []
+        for event in load_events(root):
+            if event_matches(spec, event):
+                result.append({"instance_id": event["event_id"], "event": event})
+        return result
+    scheduled = dt.datetime.fromisoformat(trigger["at"])
+    if scheduled.tzinfo is None:
+        raise ValueError("trigger.at debe incluir zona horaria")
+    if now < scheduled:
+        return []
+    catch_up = spec.get("catch_up", "execute")
+    if catch_up == "skip" and now > scheduled:
+        return []
+    if catch_up == "expire":
+        grace = int(trigger.get("grace_period_seconds", 0))
+        if now > scheduled + dt.timedelta(seconds=grace):
+            return []
+    return [{"instance_id": "at_" + scheduled.isoformat(), "scheduled_at": scheduled.isoformat()}]
+
+
+def run_due_tasks(root: Path, current_node: str | None = None, now: dt.datetime | None = None) -> dict[str, Any]:
+    current_node = current_node or node_id(root)
+    now = now or dt.datetime.now().astimezone()
+    directories = task_dirs(root)
+    result = {"node_id": current_node, "evaluated": 0, "executed": 0, "skipped": 0, "receipts": []}
+    for envelope in load_tasks(root):
+        task_id = envelope["task_id"]
+        spec = envelope["spec"]
+        if spec.get("executor") != current_node:
+            continue
+        result["evaluated"] += 1
+        if not (directories["approvals"] / f"{task_id}.json").exists() or (directories["cancellations"] / f"{task_id}.json").exists():
+            result["skipped"] += 1
+            continue
+        for instance in due_instances(root, envelope, now):
+            execution_id = content_id("exec", {"task_id": task_id, "instance_id": instance["instance_id"]})
+            receipt_path = directories["receipts"] / f"{execution_id}.json"
+            if receipt_path.exists():
+                result["skipped"] += 1
+                continue
+            inbox_item = {
+                "notification_id": execution_id,
+                "task_id": task_id,
+                "trigger_instance": instance["instance_id"],
+                "project": spec["project"],
+                "title": spec["action"].get("title", "Memento notification"),
+                "message": spec["action"].get("message", "A replicated task was triggered."),
+                "created_at": now.isoformat(timespec="seconds"),
+                "event": instance.get("event"),
+            }
+            write_once(directories["inbox"] / f"{execution_id}.json", inbox_item)
+            receipt = {"execution_id": execution_id, "task_id": task_id, "trigger_instance": instance["instance_id"], "executor": current_node, "status": "succeeded", "executed_at": now.isoformat(timespec="seconds")}
+            if write_once(receipt_path, receipt):
+                result["executed"] += 1
+                result["receipts"].append(receipt)
+    return result
+
+
+def inbox_items(root: Path, include_acknowledged: bool = False) -> list[dict[str, Any]]:
+    directories = task_dirs(root)
+    acknowledged = {path.stem for path in directories["acknowledged"].glob("exec_*.json")}
+    items = []
+    for path in directories["inbox"].glob("exec_*.json"):
+        item = json.loads(path.read_text(encoding="utf-8"))
+        item["acknowledged"] = item["notification_id"] in acknowledged
+        if include_acknowledged or not item["acknowledged"]:
+            items.append(item)
+    items.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    return items
+
+
+def acknowledge_notification(root: Path, notification_id: str, actor: str) -> bool:
+    if not (task_dirs(root)["inbox"] / f"{notification_id}.json").exists():
+        raise ValueError("notificación no encontrada")
+    value = {"notification_id": notification_id, "acknowledged_by": actor, "acknowledged_at": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
+    return write_once(task_dirs(root)["acknowledged"] / f"{notification_id}.json", value)
+
+
 def public(item: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in item.items() if key != "path"}
 
@@ -214,6 +466,16 @@ TOOLS = [
     {"name": "activity_add", "description": "Registra una actividad inmutable", "inputSchema": {"type": "object", "required": ["project", "action", "details"], "properties": {"project": {"type": "string"}, "action": {"type": "string"}, "details": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}}},
     {"name": "activity_list", "description": "Lista actividades recientes", "inputSchema": {"type": "object", "required": ["project"], "properties": {"project": {"type": "string"}, "limit": {"type": "integer"}, "actor": {"type": "string"}}}},
     {"name": "activity_search", "description": "Busca actividades", "inputSchema": {"type": "object", "required": ["project", "query"], "properties": {"project": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer"}, "actor": {"type": "string"}}}},
+    {"name": "task_create", "description": "Crea una tarea inmutable para un nodo", "inputSchema": {"type": "object", "required": ["executor", "project", "trigger", "action"], "properties": {"executor": {"type": "string"}, "project": {"type": "string"}, "trigger": {"type": "object"}, "action": {"type": "object"}, "catch_up": {"type": "string"}}}},
+    {"name": "task_import", "description": "Importa una tarea replicada y verifica su hash", "inputSchema": {"type": "object", "required": ["task"], "properties": {"task": {"type": "object"}}}},
+    {"name": "task_approve", "description": "Aprueba localmente una tarea importada", "inputSchema": {"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string"}}}},
+    {"name": "task_list", "description": "Lista tareas locales", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}}}},
+    {"name": "task_cancel", "description": "Cancela una tarea de forma append-only", "inputSchema": {"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string"}}}},
+    {"name": "task_run_due", "description": "Evalúa y ejecuta tareas pendientes del nodo", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "event_list", "description": "Lista eventos replicables", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}}}},
+    {"name": "event_import", "description": "Importa un evento durable desde otro Memento", "inputSchema": {"type": "object", "required": ["event"], "properties": {"event": {"type": "object"}}}},
+    {"name": "inbox_list", "description": "Lista notificaciones generadas por tareas", "inputSchema": {"type": "object", "properties": {"include_acknowledged": {"type": "boolean"}}}},
+    {"name": "inbox_ack", "description": "Marca una notificación como leída", "inputSchema": {"type": "object", "required": ["notification_id"], "properties": {"notification_id": {"type": "string"}}}},
     {"name": "memory_save", "description": "Guarda una memoria Markdown", "inputSchema": {"type": "object", "required": ["project", "title", "content"], "properties": {"project": {"type": "string"}, "title": {"type": "string"}, "content": {"type": "string"}, "type": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}}},
     {"name": "memory_search", "description": "Busca memorias por texto", "inputSchema": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "project": {"type": "string"}, "limit": {"type": "integer"}}}},
     {"name": "memory_get", "description": "Obtiene una memoria por ID", "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}}},
@@ -227,6 +489,7 @@ def mcp_call(root: Path, name: str, args: dict[str, Any], principal: dict[str, A
     if name == "activity_add":
         require_access(user, args["project"], write=True)
         item = save_memory(root, args["project"], args["action"], args["details"], "activity", args.get("tags", []), user["username"])
+        record_event(root, item)
         audit(root, user["username"], "activity.add", args["project"], {"id": item["id"], "action": args["action"]})
         return public(item)
     if name in ("activity_list", "activity_search"):
@@ -235,6 +498,60 @@ def mcp_call(root: Path, name: str, args: dict[str, Any], principal: dict[str, A
         items = search_memories(root, query, args["project"], args.get("limit", 20))
         items = [item for item in items if item.get("type") == "activity" and (not args.get("actor") or item.get("author") == args["actor"])]
         return [public(x) for x in items[: args.get("limit", 20)]]
+    if name == "task_create":
+        require_access(user, args["project"], write=True)
+        envelope = create_task(root, user["username"], args["executor"], args["project"], args["trigger"], args["action"], args.get("catch_up", "execute"))
+        audit(root, user["username"], "task.created", args["project"], {"task_id": envelope["task_id"], "executor": args["executor"]})
+        return envelope
+    if name == "task_import":
+        spec = args["task"].get("spec", {})
+        require_access(user, spec.get("project", ""), write=True)
+        return import_task(root, args["task"])
+    if name == "task_approve":
+        envelope = next((task for task in load_tasks(root) if task["task_id"] == args["task_id"]), None)
+        if not envelope:
+            raise ValueError("tarea no encontrada")
+        require_access(user, envelope["spec"]["project"], admin=True)
+        if envelope["spec"]["executor"] != node_id(root):
+            raise PermissionError("sólo el nodo ejecutor puede aprobar esta tarea")
+        return {"task_id": args["task_id"], "approved": approve_task(root, args["task_id"], user["username"])}
+    if name == "task_list":
+        project = args.get("project")
+        if project:
+            require_access(user, project)
+        directories = task_dirs(root)
+        result = []
+        for envelope in load_tasks(root):
+            spec = envelope["spec"]
+            if (not project or spec["project"] == project) and project_allowed(user, spec["project"]):
+                result.append({**envelope, "approved": (directories["approvals"] / f"{envelope['task_id']}.json").exists(), "cancelled": (directories["cancellations"] / f"{envelope['task_id']}.json").exists()})
+        return result
+    if name == "task_cancel":
+        envelope = next((task for task in load_tasks(root) if task["task_id"] == args["task_id"]), None)
+        if not envelope:
+            raise ValueError("tarea no encontrada")
+        require_access(user, envelope["spec"]["project"], admin=True)
+        return {"task_id": args["task_id"], "cancelled": cancel_task(root, args["task_id"], user["username"])}
+    if name == "task_run_due":
+        if user["role"] != "admin":
+            raise PermissionError("se requiere rol admin")
+        return run_due_tasks(root)
+    if name == "event_list":
+        project = args.get("project")
+        if project:
+            require_access(user, project)
+        return [event for event in load_events(root) if (not project or event["project"] == project) and project_allowed(user, event["project"])]
+    if name == "event_import":
+        require_access(user, args["event"].get("project", ""), write=True)
+        return {"event_id": args["event"].get("event_id"), "imported": import_event(root, args["event"])}
+    if name == "inbox_list":
+        return [item for item in inbox_items(root, args.get("include_acknowledged", False)) if project_allowed(user, item["project"])]
+    if name == "inbox_ack":
+        item = next((item for item in inbox_items(root, True) if item["notification_id"] == args["notification_id"]), None)
+        if not item:
+            raise ValueError("notificación no encontrada")
+        require_access(user, item["project"])
+        return {"notification_id": args["notification_id"], "acknowledged": acknowledge_notification(root, args["notification_id"], user["username"])}
     if name == "memory_save":
         require_access(user, args["project"], write=True)
         return public(save_memory(root, args["project"], args["title"], args["content"], args.get("type", "note"), args.get("tags", []), user["username"]))
@@ -417,6 +734,27 @@ def parser() -> argparse.ArgumentParser:
     revoke = user_sub.add_parser("revoke")
     revoke.add_argument("--root")
     revoke.add_argument("--username", required=True)
+    node = sub.add_parser("node")
+    node_sub = node.add_subparsers(dest="node_command", required=True)
+    node_show = node_sub.add_parser("show")
+    node_show.add_argument("--root")
+    node_set = node_sub.add_parser("set")
+    node_set.add_argument("id")
+    node_set.add_argument("--root")
+    tasks = sub.add_parser("tasks")
+    task_sub = tasks.add_subparsers(dest="task_command", required=True)
+    task_list = task_sub.add_parser("list")
+    task_list.add_argument("--root")
+    task_run = task_sub.add_parser("run")
+    task_run.add_argument("--root")
+    inbox = sub.add_parser("inbox")
+    inbox_sub = inbox.add_subparsers(dest="inbox_command", required=True)
+    inbox_list = inbox_sub.add_parser("list")
+    inbox_list.add_argument("--root")
+    inbox_list.add_argument("--all", action="store_true")
+    inbox_ack = inbox_sub.add_parser("ack")
+    inbox_ack.add_argument("notification_id")
+    inbox_ack.add_argument("--root")
     return p
 
 
@@ -488,6 +826,24 @@ def main() -> int:
             write_users(root, users_data)
             audit(root, os.environ.get("USER", "local-admin"), "user.revoked", None, {"username": args.username})
             print(args.username)
+    elif args.command == "node":
+        if args.node_command == "show":
+            print(node_id(root))
+        else:
+            set_node_id(root, args.id)
+            print(args.id)
+    elif args.command == "tasks":
+        if args.task_command == "list":
+            directories = task_dirs(root)
+            values = [{**task, "approved": (directories["approvals"] / f"{task['task_id']}.json").exists(), "cancelled": (directories["cancellations"] / f"{task['task_id']}.json").exists()} for task in load_tasks(root)]
+            print(json.dumps(values, ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps(run_due_tasks(root), ensure_ascii=False, indent=2))
+    elif args.command == "inbox":
+        if args.inbox_command == "list":
+            print(json.dumps(inbox_items(root, args.all), ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps({"notification_id": args.notification_id, "acknowledged": acknowledge_notification(root, args.notification_id, os.environ.get("USER", "local"))}, ensure_ascii=False, indent=2))
     return 0
 
 
