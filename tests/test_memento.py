@@ -134,6 +134,12 @@ class MementoTest(unittest.TestCase):
         result = memento.run_due_tasks(self.root, "node-b", dt.datetime.fromisoformat("2026-08-25T11:00:00-03:00"))
         self.assertEqual(result["executed"], 0)
 
+    def test_remote_peer_requires_https(self):
+        token_file = Path(self.temp.name) / "peer.token"
+        token_file.write_text("x" * 32)
+        with self.assertRaises(ValueError):
+            memento.add_peer(self.root, "unsafe", "http://example.com:7337", str(token_file))
+
 
 if __name__ == "__main__":
     unittest.main()

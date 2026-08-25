@@ -10,6 +10,11 @@ import secrets
 import sys
 import hmac
 import hashlib
+import threading
+import time
+import urllib.error
+import urllib.request
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -458,6 +463,115 @@ def acknowledge_notification(root: Path, notification_id: str, actor: str) -> bo
     return write_once(task_dirs(root)["acknowledged"] / f"{notification_id}.json", value)
 
 
+def peers_dir(root: Path) -> Path:
+    directory = root / "peers"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def add_peer(root: Path, name: str, url: str, token_file: str) -> dict[str, Any]:
+    if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", name):
+        raise ValueError("nombre de peer inválido")
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("URL de peer inválida")
+    if parsed.scheme == "http" and parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+        raise ValueError("peers remotos requieren HTTPS")
+    token_path = Path(token_file).expanduser().resolve()
+    if not token_path.is_file():
+        raise ValueError("token_file no existe")
+    peer = {"name": name, "url": url.rstrip("/"), "token_file": str(token_path), "created_at": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
+    path = peers_dir(root) / f"{name}.json"
+    path.write_text(json.dumps(peer, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(path, 0o600)
+    return {key: value for key, value in peer.items() if key != "token_file"}
+
+
+def load_peers(root: Path) -> list[dict[str, Any]]:
+    peers = []
+    for path in peers_dir(root).glob("*.json"):
+        try:
+            peers.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return sorted(peers, key=lambda peer: peer.get("name", ""))
+
+
+def json_files(directory: Path, pattern: str) -> list[dict[str, Any]]:
+    result = []
+    for path in directory.glob(pattern):
+        try:
+            result.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return result
+
+
+def peer_snapshot(root: Path, principal: dict[str, Any]) -> dict[str, Any]:
+    directories = task_dirs(root)
+    tasks = [task for task in load_tasks(root) if project_allowed(principal, task["spec"]["project"])]
+    task_projects = {task["task_id"]: task["spec"]["project"] for task in tasks}
+    events = [event for event in load_events(root) if project_allowed(principal, event["project"])]
+    cancellations = [item for item in json_files(directories["cancellations"], "task_*.json") if item.get("task_id") in task_projects]
+    receipts = [item for item in json_files(directories["receipts"], "exec_*.json") if item.get("task_id") in task_projects]
+    return {"node_id": node_id(root), "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"), "tasks": tasks, "events": events, "cancellations": cancellations, "receipts": receipts}
+
+
+def import_cancellation(root: Path, cancellation: dict[str, Any]) -> bool:
+    task_id = cancellation.get("task_id", "")
+    if not re.fullmatch(r"task_[a-f0-9]{64}", task_id):
+        raise ValueError("cancelación inválida")
+    return write_once(task_dirs(root)["cancellations"] / f"{task_id}.json", cancellation)
+
+
+def import_receipt(root: Path, receipt: dict[str, Any]) -> bool:
+    expected = content_id("exec", {"task_id": receipt.get("task_id"), "instance_id": receipt.get("trigger_instance")})
+    if receipt.get("execution_id") != expected:
+        raise ValueError("receipt inválido")
+    return write_once(task_dirs(root)["receipts"] / f"{expected}.json", receipt)
+
+
+def sync_peer(root: Path, peer: dict[str, Any], timeout: float = 5.0) -> dict[str, Any]:
+    token = Path(peer["token_file"]).read_text(encoding="utf-8").strip()
+    request = urllib.request.Request(peer["url"] + "/peer/snapshot", headers={"Authorization": "Bearer " + token, "Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        maximum = int(os.environ.get("MEMENTO_PEER_MAX_BYTES", "8388608"))
+        body = response.read(maximum + 1)
+        if len(body) > maximum:
+            raise ValueError("snapshot de peer excede el límite")
+        snapshot = json.loads(body)
+    result = {"peer": peer["name"], "remote_node": snapshot.get("node_id"), "tasks": 0, "events": 0, "cancellations": 0, "receipts": 0}
+    for task in snapshot.get("tasks", []):
+        if import_task(root, task)["imported"]:
+            result["tasks"] += 1
+    for event in snapshot.get("events", []):
+        if import_event(root, event):
+            result["events"] += 1
+    for cancellation in snapshot.get("cancellations", []):
+        if import_cancellation(root, cancellation):
+            result["cancellations"] += 1
+    for receipt in snapshot.get("receipts", []):
+        if import_receipt(root, receipt):
+            result["receipts"] += 1
+    return result
+
+
+def sync_all_peers(root: Path, timeout: float = 5.0) -> dict[str, Any]:
+    result = {"synced": [], "failed": []}
+    for peer in load_peers(root):
+        try:
+            result["synced"].append(sync_peer(root, peer, timeout))
+        except Exception as exc:
+            result["failed"].append({"peer": peer.get("name"), "error": str(exc)})
+    return result
+
+
+def peer_cycle(root: Path) -> dict[str, Any]:
+    sync = sync_all_peers(root)
+    execution = run_due_tasks(root)
+    return {"sync": sync, "execution": execution}
+
+
 def public(item: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in item.items() if key != "path"}
 
@@ -474,6 +588,8 @@ TOOLS = [
     {"name": "task_run_due", "description": "Evalúa y ejecuta tareas pendientes del nodo", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "event_list", "description": "Lista eventos replicables", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}}}},
     {"name": "event_import", "description": "Importa un evento durable desde otro Memento", "inputSchema": {"type": "object", "required": ["event"], "properties": {"event": {"type": "object"}}}},
+    {"name": "peer_list", "description": "Lista peers configurados", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "peer_sync", "description": "Sincroniza peers y ejecuta tareas pendientes", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "inbox_list", "description": "Lista notificaciones generadas por tareas", "inputSchema": {"type": "object", "properties": {"include_acknowledged": {"type": "boolean"}}}},
     {"name": "inbox_ack", "description": "Marca una notificación como leída", "inputSchema": {"type": "object", "required": ["notification_id"], "properties": {"notification_id": {"type": "string"}}}},
     {"name": "memory_save", "description": "Guarda una memoria Markdown", "inputSchema": {"type": "object", "required": ["project", "title", "content"], "properties": {"project": {"type": "string"}, "title": {"type": "string"}, "content": {"type": "string"}, "type": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}}},
@@ -544,6 +660,12 @@ def mcp_call(root: Path, name: str, args: dict[str, Any], principal: dict[str, A
     if name == "event_import":
         require_access(user, args["event"].get("project", ""), write=True)
         return {"event_id": args["event"].get("event_id"), "imported": import_event(root, args["event"])}
+    if name == "peer_list":
+        return [{key: value for key, value in peer.items() if key != "token_file"} for peer in load_peers(root)]
+    if name == "peer_sync":
+        if user["role"] != "admin":
+            raise PermissionError("se requiere rol admin")
+        return peer_cycle(root)
     if name == "inbox_list":
         return [item for item in inbox_items(root, args.get("include_acknowledged", False)) if project_allowed(user, item["project"])]
     if name == "inbox_ack":
@@ -643,6 +765,15 @@ def serve_http(root: Path, host: str, port: int, allowed_origins: set[str]) -> N
         def do_GET(self) -> None:
             if self.path == "/health":
                 self.send_json(200, {"ok": True, "service": "memento", "version": VERSION})
+            elif self.path == "/peer/snapshot":
+                principal = self.principal()
+                if not principal:
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Bearer realm="memento"')
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.send_json(200, peer_snapshot(root, principal))
             else:
                 self.send_json(405 if self.path == "/mcp" else 404, {"error": "method_not_allowed" if self.path == "/mcp" else "not_found"})
 
@@ -683,6 +814,21 @@ def serve_http(root: Path, host: str, port: int, allowed_origins: set[str]) -> N
             print(f"http {self.address_string()} {fmt % args}", file=sys.stderr)
 
     server = ThreadingHTTPServer((host, port), Handler)
+    interval = max(0.0, float(os.environ.get("MEMENTO_PEER_SYNC_INTERVAL", "30")))
+
+    def background_sync() -> None:
+        while True:
+            try:
+                cycle = peer_cycle(root)
+                if cycle["sync"]["synced"] or cycle["sync"]["failed"] or cycle["execution"]["executed"]:
+                    print("peer " + json.dumps(cycle, ensure_ascii=False), file=sys.stderr)
+            except Exception as exc:
+                print(f"peer cycle error: {exc}", file=sys.stderr)
+            if interval <= 0:
+                return
+            time.sleep(interval)
+
+    threading.Thread(target=background_sync, name="memento-peer-sync", daemon=True).start()
     print(f"Memento MCP escuchando en http://{host}:{server.server_port}/mcp", file=sys.stderr)
     server.serve_forever()
 
@@ -755,6 +901,17 @@ def parser() -> argparse.ArgumentParser:
     inbox_ack = inbox_sub.add_parser("ack")
     inbox_ack.add_argument("notification_id")
     inbox_ack.add_argument("--root")
+    peers = sub.add_parser("peers")
+    peer_sub = peers.add_subparsers(dest="peer_command", required=True)
+    peer_add = peer_sub.add_parser("add")
+    peer_add.add_argument("--root")
+    peer_add.add_argument("--name", required=True)
+    peer_add.add_argument("--url", required=True)
+    peer_add.add_argument("--token-file", required=True)
+    peer_list = peer_sub.add_parser("list")
+    peer_list.add_argument("--root")
+    peer_sync = peer_sub.add_parser("sync")
+    peer_sync.add_argument("--root")
     return p
 
 
@@ -844,6 +1001,13 @@ def main() -> int:
             print(json.dumps(inbox_items(root, args.all), ensure_ascii=False, indent=2))
         else:
             print(json.dumps({"notification_id": args.notification_id, "acknowledged": acknowledge_notification(root, args.notification_id, os.environ.get("USER", "local"))}, ensure_ascii=False, indent=2))
+    elif args.command == "peers":
+        if args.peer_command == "add":
+            print(json.dumps(add_peer(root, args.name, args.url, args.token_file), ensure_ascii=False, indent=2))
+        elif args.peer_command == "list":
+            print(json.dumps([{key: value for key, value in peer.items() if key != "token_file"} for peer in load_peers(root)], ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps(peer_cycle(root), ensure_ascii=False, indent=2))
     return 0
 
 

@@ -174,6 +174,7 @@ Herramientas MCP:
 - `task_create`, `task_import`, `task_approve`, `task_list`, `task_cancel`
 - `task_run_due`
 - `event_list`, `event_import`
+- `peer_list`, `peer_sync`
 - `inbox_list`, `inbox_ack`
 
 Al volver online, el nodo recibe tareas y eventos faltantes, aprueba las tareas
@@ -187,6 +188,37 @@ dirigidas a él y ejecuta:
 Cada combinación de tarea e instancia del trigger produce un `execution_id`
 determinista. Los receipts hacen que una segunda evaluación no duplique la
 notificación.
+
+### Peers y reconexión
+
+En el nodo B, agregue A usando un token de A con acceso sólo a los proyectos
+que deben compartirse:
+
+```bash
+./memento peers add --root .memory \
+  --name memento-a \
+  --url https://memento-a.example.com \
+  --token-file ~/.config/memento/peer-a.token
+```
+
+Sincronización manual:
+
+```bash
+./memento peers sync --root .memory
+```
+
+`serve-http` ejecuta un ciclo de sincronización y evaluación al arrancar y lo
+repite cada 30 segundos. Cambie el intervalo con
+`MEMENTO_PEER_SYNC_INTERVAL`; use `0` para ejecutar sólo al inicio. Los peers
+remotos requieren HTTPS; HTTP se acepta únicamente para localhost. Los
+snapshots tienen un límite predeterminado de 8 MiB configurable con
+`MEMENTO_PEER_MAX_BYTES`.
+
+Prueba E2E real con dos procesos, apagado y dos reinicios de B:
+
+```bash
+python3 tests/e2e_peer_restart.py
+```
 
 ## Sincronización
 
