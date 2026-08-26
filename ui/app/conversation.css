@@ -6,3 +6,5 @@
 .message-card p { color: #c9ddd5; font-size: .88rem; line-height: 1.45; margin: .3rem 0; }
 .message-card small { color: var(--muted); font: .7rem ui-monospace, SFMono-Regular, Menlo, monospace; }
 .reply { margin-top: 1rem; }
+.remote-search { margin: 1rem 0; }
+.remote-search > p { color: var(--muted); font-size: .88rem; line-height: 1.5; }

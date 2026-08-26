@@ -504,6 +504,10 @@ def load_peers(root: Path) -> list[dict[str, Any]]:
     return sorted(peers, key=lambda peer: peer.get("name", ""))
 
 
+def find_peer(root: Path, name: str) -> dict[str, Any] | None:
+    return next((peer for peer in load_peers(root) if peer.get("name") == name), None)
+
+
 def json_files(directory: Path, pattern: str) -> list[dict[str, Any]]:
     result = []
     for path in directory.glob(pattern):
@@ -563,6 +567,30 @@ def sync_peer(root: Path, peer: dict[str, Any], timeout: float = 5.0) -> dict[st
     return result
 
 
+def search_peer(root: Path, name: str, project: str, query: str, limit: int = 20, activities_only: bool = False, timeout: float = 5.0) -> dict[str, Any]:
+    """Consulta datos ya guardados en un peer, sin importarlos ni replicarlos."""
+    peer = find_peer(root, name)
+    if not peer:
+        raise ValueError("peer no encontrado")
+    token = Path(peer["token_file"]).read_text(encoding="utf-8").strip()
+    tool = "activity_search" if activities_only else "memory_search"
+    arguments = {"project": project, "query": query, "limit": max(1, min(limit, 100))}
+    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}}).encode("utf-8")
+    request = urllib.request.Request(peer["url"] + "/mcp", data=payload, headers={"Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        body = response.read(1_048_577)
+        if len(body) > 1_048_576:
+            raise ValueError("respuesta de búsqueda excede el límite")
+        response_data = json.loads(body)
+    if response_data.get("error"):
+        raise ValueError(response_data["error"].get("message", "búsqueda remota falló"))
+    text = response_data.get("result", {}).get("content", [{}])[0].get("text", "[]")
+    items = json.loads(text)
+    if not isinstance(items, list):
+        raise ValueError("respuesta de búsqueda inválida")
+    return {"peer": name, "project": project, "query": query, "items": items}
+
+
 def sync_all_peers(root: Path, timeout: float = 5.0) -> dict[str, Any]:
     result = {"synced": [], "failed": []}
     for peer in load_peers(root):
@@ -597,6 +625,7 @@ TOOLS = [
     {"name": "event_import", "description": "Importa un evento durable desde otro Memento", "inputSchema": {"type": "object", "required": ["event"], "properties": {"event": {"type": "object"}}}},
     {"name": "peer_list", "description": "Lista peers configurados", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "peer_sync", "description": "Sincroniza peers y ejecuta tareas pendientes", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "peer_search", "description": "Busca en la memoria ya guardada de un peer sin replicarla", "inputSchema": {"type": "object", "required": ["peer", "project", "query"], "properties": {"peer": {"type": "string"}, "project": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer"}, "activities_only": {"type": "boolean"}}}},
     {"name": "inbox_list", "description": "Lista notificaciones generadas por tareas", "inputSchema": {"type": "object", "properties": {"include_acknowledged": {"type": "boolean"}}}},
     {"name": "inbox_ack", "description": "Marca una notificación como leída", "inputSchema": {"type": "object", "required": ["notification_id"], "properties": {"notification_id": {"type": "string"}}}},
     {"name": "memory_save", "description": "Guarda una memoria Markdown", "inputSchema": {"type": "object", "required": ["project", "title", "content"], "properties": {"project": {"type": "string"}, "title": {"type": "string"}, "content": {"type": "string"}, "type": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}}},
@@ -673,6 +702,9 @@ def mcp_call(root: Path, name: str, args: dict[str, Any], principal: dict[str, A
         if user["role"] != "admin":
             raise PermissionError("se requiere rol admin")
         return peer_cycle(root)
+    if name == "peer_search":
+        require_access(user, args["project"])
+        return search_peer(root, args["peer"], args["project"], args["query"], args.get("limit", 20), args.get("activities_only", False))
     if name == "inbox_list":
         return [item for item in inbox_items(root, args.get("include_acknowledged", False)) if project_allowed(user, item["project"])]
     if name == "inbox_ack":

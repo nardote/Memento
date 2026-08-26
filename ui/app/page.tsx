@@ -6,6 +6,7 @@ type NodeKey = 'a' | 'b';
 type NodeConfig = { name: string; url: string; token: string; status: 'unknown' | 'online' | 'offline' };
 type Task = { task_id: string; spec: { creator: string; executor: string; project: string; action: { title?: string; message?: string; request_kind?: string } }; approved?: boolean };
 type Event = { event_id: string; title: string; content: string; tags: string[]; occurred_at: string; actor?: string };
+type RemoteItem = { id?: string; title?: string; content?: string; type?: string; created_at?: string; author?: string };
 
 const initialNodes: Record<NodeKey, NodeConfig> = {
   a: { name: 'Memento A', url: 'http://127.0.0.1:8781', token: '', status: 'unknown' },
@@ -28,6 +29,8 @@ export default function Home() {
   const [replyDetails, setReplyDetails] = useState('');
   const [requests, setRequests] = useState<Task[]>([]);
   const [responses, setResponses] = useState<Event[]>([]);
+  const [remoteQuery, setRemoteQuery] = useState('');
+  const [remoteItems, setRemoteItems] = useState<RemoteItem[]>([]);
   const active = nodes[selected];
   const hasToken = useMemo(() => active.token.trim().length > 0, [active.token]);
 
@@ -101,6 +104,12 @@ export default function Home() {
     if (Array.isArray(result)) setResponses(result.filter((item): item is Event => typeof item === 'object' && item !== null && Array.isArray((item as Event).tags) && (item as Event).tags.some((tag) => tag.startsWith('request:'))));
   }
 
+  async function searchRemote(event: FormEvent) {
+    event.preventDefault();
+    const result = await call('peer_search', { peer: targetNode, project, query: remoteQuery, limit: 20 }) as { items?: unknown } | undefined;
+    if (Array.isArray(result?.items)) setRemoteItems(result.items.filter((item): item is RemoteItem => typeof item === 'object' && item !== null));
+  }
+
   return <main>
     <header className="topbar"><div><p className="eyebrow">Control local</p><h1>Memento Console</h1></div><p className="session-note">Los tokens viven sólo en esta pestaña.</p></header>
     <section className="node-grid" aria-label="Nodos Memento">
@@ -118,6 +127,7 @@ export default function Home() {
           <label>Proyecto<input value={project} onChange={(event) => setProject(event.target.value)} placeholder="equipo" /></label>
           <div className="button-grid"><button disabled={busy} onClick={() => call('activity_list', { project, limit: 20 })}>Ver actividades</button><button disabled={busy} onClick={() => call('task_list', { project })}>Ver tareas</button><button disabled={busy} onClick={() => call('inbox_list', {})}>Ver inbox</button><button disabled={busy} onClick={() => call('peer_list', {})}>Ver peers</button><button disabled={busy} onClick={() => call('peer_sync', {})}>Sincronizar ahora</button><button disabled={busy} onClick={() => call('task_run_due', {})}>Evaluar triggers</button></div>
         </div>
+        <section className="panel remote-search"><div className="section-title"><div><p className="eyebrow">Búsqueda directa</p><h2>Buscar en {targetNode}</h2></div></div><p>Consulta lo que el otro nodo ya tiene guardado. No crea tareas, no sincroniza ni copia la información.</p><form className="inline-form" onSubmit={searchRemote}><input required value={remoteQuery} onChange={(event) => setRemoteQuery(event.target.value)} placeholder="Ej.: refunds, diagnóstico, SKY-123" /><button disabled={busy} type="submit">Buscar</button></form><div className="conversation-actions">{remoteItems.map((item, index) => <article className="message-card" key={item.id || `${item.title}-${index}`}><strong>{item.title || 'Sin título'}</strong><p>{item.content || 'Sin contenido'}</p><small>{item.type || 'memoria'} · {item.author || 'autor no disponible'} · {item.created_at || ''}</small></article>)}</div></section>
         <form className="panel activity-form" onSubmit={addActivity}><div className="section-title"><div><p className="eyebrow">Nueva actividad</p><h2>Registrar información</h2></div></div>
           <label>Acción<input required value={action} onChange={(event) => setAction(event.target.value)} placeholder="Ej.: Hallazgo confirmado" /></label><label>Detalle<textarea required value={details} onChange={(event) => setDetails(event.target.value)} placeholder="Qué cambió, evidencia y próximo paso" rows={4} /></label><label>Tags separados por coma<input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="topic:refunds, ticket:SKY-123" /></label><button disabled={busy} type="submit">{busy ? 'Enviando…' : 'Guardar actividad'}</button>
         </form>

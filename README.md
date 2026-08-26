@@ -319,6 +319,12 @@ desde B usá **Responder una solicitud** con el `task_id`: la respuesta se
 guarda como actividad con un tag `request:<task_id>` y se replica como evento
 hacia A. En A, **Ver respuestas recibidas** muestra esas respuestas.
 
+Si sólo necesitás encontrar información que B ya guardó, no crees una tarea:
+seleccioná A y usá **Búsqueda directa**. La consulta llega a B con el token de
+peer autorizado y devuelve resultados de sus memorias sin importarlos,
+replicarlos ni modificar el contenido de ninguno de los nodos. B debe estar
+online para responder la búsqueda.
+
 Prueba E2E real con dos procesos, apagado y dos reinicios de B:
 
 ```bash
