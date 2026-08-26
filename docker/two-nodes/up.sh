@@ -25,3 +25,4 @@ done
 docker compose -f "$PROJECT_DIR/docker-compose.two-nodes.yml" up --build -d
 printf 'Memento A: http://127.0.0.1:8781 (admin token: %s/a-admin.token)\n' "$SECRETS_DIR"
 printf 'Memento B: http://127.0.0.1:8782 (admin token: %s/b-admin.token)\n' "$SECRETS_DIR"
+printf 'Memento Console: http://127.0.0.1:3000 (tokens precargados desde secretos locales)\n'

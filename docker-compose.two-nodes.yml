@@ -31,6 +31,17 @@ services:
       - ./docker/two-nodes/bootstrap:/bootstrap:ro
       - ./.memento-docker-secrets:/secrets:ro
 
+  memento-ui:
+    build:
+      context: ./ui
+    depends_on:
+      - memento-a
+      - memento-b
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./.memento-docker-secrets:/secrets:ro
+
 volumes:
   memento-a-data:
   memento-b-data:

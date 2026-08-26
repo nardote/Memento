@@ -300,18 +300,17 @@ una tarea recibida.
 Los tokens nunca se guardan en el proyecto, `localStorage` ni en la imagen: se
 mantienen solamente en memoria hasta que cerrás o recargás la pestaña.
 
-Con los dos nodos levantados, iniciá el panel local:
+El comando de arranque inicia también el panel local:
 
 ```bash
-cd ui
-npm install
-npm run dev
+./docker/two-nodes/up.sh
 ```
 
-Abrí la URL que indique el comando (habitualmente `http://127.0.0.1:3000`).
-En el panel pegá el contenido de `../.memento-docker-secrets/a-admin.token`
-para A y el de `b-admin.token` para B. El Compose habilita ese origen local,
-pero no habilita orígenes públicos.
+Abrí `http://127.0.0.1:3000`. El contenedor de la UI carga automáticamente los tokens de administrador de A y B desde
+`.memento-docker-secrets/`, que está ignorada por Git. No los persiste en
+`localStorage` ni los incluye en el código fuente. El Compose habilita ese
+origen local, pero no habilita orígenes públicos; el puerto del panel está
+ligado solamente a `127.0.0.1`.
 
 Para pedir información entre nodos, seleccioná A y usá **Solicitud entre
 nodos**. La tarea llega a B, donde debe aprobarse antes de ejecutarse. Luego,

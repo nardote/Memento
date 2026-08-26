@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
 
 type NodeKey = 'a' | 'b';
 type NodeConfig = { name: string; url: string; token: string; status: 'unknown' | 'online' | 'offline' };
@@ -33,6 +33,16 @@ export default function Home() {
   const [remoteItems, setRemoteItems] = useState<RemoteItem[]>([]);
   const active = nodes[selected];
   const hasToken = useMemo(() => active.token.trim().length > 0, [active.token]);
+
+  useEffect(() => {
+    fetch('/api/bootstrap', { cache: 'no-store' })
+      .then((response) => response.ok ? response.json() as Promise<{ a?: string; b?: string }> : {})
+      .then((tokens) => setNodes((current) => ({
+        a: { ...current.a, token: current.a.token || tokens.a || '' },
+        b: { ...current.b, token: current.b.token || tokens.b || '' },
+      })))
+      .catch(() => undefined);
+  }, []);
 
   function updateNode(key: NodeKey, changes: Partial<NodeConfig>) { setNodes((current) => ({ ...current, [key]: { ...current[key], ...changes } })); }
 
@@ -111,7 +121,7 @@ export default function Home() {
   }
 
   return <main>
-    <header className="topbar"><div><p className="eyebrow">Control local</p><h1>Memento Console</h1></div><p className="session-note">Los tokens viven sólo en esta pestaña.</p></header>
+    <header className="topbar"><div><p className="eyebrow">Control local</p><h1>Memento Console</h1></div><p className="session-note">En Docker, los tokens se cargan desde secretos locales y no se guardan en el navegador.</p></header>
     <section className="node-grid" aria-label="Nodos Memento">
       {(Object.keys(nodes) as NodeKey[]).map((key) => { const node = nodes[key]; return <button className={`node-card ${selected === key ? 'selected' : ''}`} key={key} onClick={() => setSelected(key)}><span className={`dot ${node.status}`} /><span><strong>{node.name}</strong><small>{node.url}</small></span><span className="token-state">{node.token ? 'token cargado' : 'sin token'}</span></button>; })}
     </section>
