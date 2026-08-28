@@ -469,18 +469,25 @@ def peers_dir(root: Path) -> Path:
     return directory
 
 
-def add_peer(root: Path, name: str, url: str, token_file: str) -> dict[str, Any]:
+def add_peer(root: Path, name: str, url: str, token_file: str, allow_insecure_http: bool = False) -> dict[str, Any]:
     if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", name):
         raise ValueError("nombre de peer inválido")
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ValueError("URL de peer inválida")
-    if parsed.scheme == "http" and parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+    local_hosts = ("127.0.0.1", "localhost", "::1")
+    if parsed.scheme == "http" and parsed.hostname not in local_hosts and not allow_insecure_http:
         raise ValueError("peers remotos requieren HTTPS")
     token_path = Path(token_file).expanduser().resolve()
     if not token_path.is_file():
         raise ValueError("token_file no existe")
-    peer = {"name": name, "url": url.rstrip("/"), "token_file": str(token_path), "created_at": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
+    peer = {
+        "name": name,
+        "url": url.rstrip("/"),
+        "token_file": str(token_path),
+        "insecure_http": parsed.scheme == "http" and parsed.hostname not in local_hosts,
+        "created_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
     path = peers_dir(root) / f"{name}.json"
     path.write_text(json.dumps(peer, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.chmod(path, 0o600)
@@ -495,6 +502,10 @@ def load_peers(root: Path) -> list[dict[str, Any]]:
         except (OSError, json.JSONDecodeError):
             continue
     return sorted(peers, key=lambda peer: peer.get("name", ""))
+
+
+def find_peer(root: Path, name: str) -> dict[str, Any] | None:
+    return next((peer for peer in load_peers(root) if peer.get("name") == name), None)
 
 
 def json_files(directory: Path, pattern: str) -> list[dict[str, Any]]:
@@ -556,6 +567,30 @@ def sync_peer(root: Path, peer: dict[str, Any], timeout: float = 5.0) -> dict[st
     return result
 
 
+def search_peer(root: Path, name: str, project: str, query: str, limit: int = 20, activities_only: bool = False, timeout: float = 5.0) -> dict[str, Any]:
+    """Consulta datos ya guardados en un peer, sin importarlos ni replicarlos."""
+    peer = find_peer(root, name)
+    if not peer:
+        raise ValueError("peer no encontrado")
+    token = Path(peer["token_file"]).read_text(encoding="utf-8").strip()
+    tool = "activity_search" if activities_only else "memory_search"
+    arguments = {"project": project, "query": query, "limit": max(1, min(limit, 100))}
+    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}}).encode("utf-8")
+    request = urllib.request.Request(peer["url"] + "/mcp", data=payload, headers={"Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        body = response.read(1_048_577)
+        if len(body) > 1_048_576:
+            raise ValueError("respuesta de búsqueda excede el límite")
+        response_data = json.loads(body)
+    if response_data.get("error"):
+        raise ValueError(response_data["error"].get("message", "búsqueda remota falló"))
+    text = response_data.get("result", {}).get("content", [{}])[0].get("text", "[]")
+    items = json.loads(text)
+    if not isinstance(items, list):
+        raise ValueError("respuesta de búsqueda inválida")
+    return {"peer": name, "project": project, "query": query, "items": items}
+
+
 def sync_all_peers(root: Path, timeout: float = 5.0) -> dict[str, Any]:
     result = {"synced": [], "failed": []}
     for peer in load_peers(root):
@@ -590,6 +625,7 @@ TOOLS = [
     {"name": "event_import", "description": "Importa un evento durable desde otro Memento", "inputSchema": {"type": "object", "required": ["event"], "properties": {"event": {"type": "object"}}}},
     {"name": "peer_list", "description": "Lista peers configurados", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "peer_sync", "description": "Sincroniza peers y ejecuta tareas pendientes", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "peer_search", "description": "Busca en la memoria ya guardada de un peer sin replicarla", "inputSchema": {"type": "object", "required": ["peer", "project", "query"], "properties": {"peer": {"type": "string"}, "project": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer"}, "activities_only": {"type": "boolean"}}}},
     {"name": "inbox_list", "description": "Lista notificaciones generadas por tareas", "inputSchema": {"type": "object", "properties": {"include_acknowledged": {"type": "boolean"}}}},
     {"name": "inbox_ack", "description": "Marca una notificación como leída", "inputSchema": {"type": "object", "required": ["notification_id"], "properties": {"notification_id": {"type": "string"}}}},
     {"name": "memory_save", "description": "Guarda una memoria Markdown", "inputSchema": {"type": "object", "required": ["project", "title", "content"], "properties": {"project": {"type": "string"}, "title": {"type": "string"}, "content": {"type": "string"}, "type": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}}},
@@ -666,6 +702,9 @@ def mcp_call(root: Path, name: str, args: dict[str, Any], principal: dict[str, A
         if user["role"] != "admin":
             raise PermissionError("se requiere rol admin")
         return peer_cycle(root)
+    if name == "peer_search":
+        require_access(user, args["project"])
+        return search_peer(root, args["peer"], args["project"], args["query"], args.get("limit", 20), args.get("activities_only", False))
     if name == "inbox_list":
         return [item for item in inbox_items(root, args.get("include_acknowledged", False)) if project_allowed(user, item["project"])]
     if name == "inbox_ack":
@@ -744,6 +783,15 @@ def serve_http(root: Path, host: str, port: int, allowed_origins: set[str]) -> N
     class Handler(BaseHTTPRequestHandler):
         server_version = "Memento/" + VERSION
 
+        def end_headers(self) -> None:
+            origin = self.headers.get("Origin")
+            if origin and origin in allowed_origins:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Vary", "Origin")
+            super().end_headers()
+
         def send_json(self, status: int, value: Any) -> None:
             body = json.dumps(value, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
@@ -809,6 +857,14 @@ def serve_http(root: Path, host: str, port: int, allowed_origins: set[str]) -> N
                 self.send_json(400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": str(exc)}})
             except Exception as exc:
                 self.send_json(500, {"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": str(exc)}})
+
+        def do_OPTIONS(self) -> None:
+            if not self.valid_origin():
+                self.send_json(403, {"error": "origin_forbidden"})
+                return
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def log_message(self, fmt: str, *args: Any) -> None:
             print(f"http {self.address_string()} {fmt % args}", file=sys.stderr)
@@ -891,6 +947,9 @@ def parser() -> argparse.ArgumentParser:
     task_sub = tasks.add_subparsers(dest="task_command", required=True)
     task_list = task_sub.add_parser("list")
     task_list.add_argument("--root")
+    task_approve = task_sub.add_parser("approve")
+    task_approve.add_argument("task_id")
+    task_approve.add_argument("--root")
     task_run = task_sub.add_parser("run")
     task_run.add_argument("--root")
     inbox = sub.add_parser("inbox")
@@ -908,6 +967,7 @@ def parser() -> argparse.ArgumentParser:
     peer_add.add_argument("--name", required=True)
     peer_add.add_argument("--url", required=True)
     peer_add.add_argument("--token-file", required=True)
+    peer_add.add_argument("--allow-insecure-http", action="store_true", help="Sólo para una red de prueba aislada")
     peer_list = peer_sub.add_parser("list")
     peer_list.add_argument("--root")
     peer_sync = peer_sub.add_parser("sync")
@@ -994,6 +1054,8 @@ def main() -> int:
             directories = task_dirs(root)
             values = [{**task, "approved": (directories["approvals"] / f"{task['task_id']}.json").exists(), "cancelled": (directories["cancellations"] / f"{task['task_id']}.json").exists()} for task in load_tasks(root)]
             print(json.dumps(values, ensure_ascii=False, indent=2))
+        elif args.task_command == "approve":
+            print(json.dumps({"task_id": args.task_id, "approved": approve_task(root, args.task_id, os.environ.get("USER", "local-admin"))}, ensure_ascii=False, indent=2))
         else:
             print(json.dumps(run_due_tasks(root), ensure_ascii=False, indent=2))
     elif args.command == "inbox":
@@ -1003,7 +1065,7 @@ def main() -> int:
             print(json.dumps({"notification_id": args.notification_id, "acknowledged": acknowledge_notification(root, args.notification_id, os.environ.get("USER", "local"))}, ensure_ascii=False, indent=2))
     elif args.command == "peers":
         if args.peer_command == "add":
-            print(json.dumps(add_peer(root, args.name, args.url, args.token_file), ensure_ascii=False, indent=2))
+            print(json.dumps(add_peer(root, args.name, args.url, args.token_file, args.allow_insecure_http), ensure_ascii=False, indent=2))
         elif args.peer_command == "list":
             print(json.dumps([{key: value for key, value in peer.items() if key != "token_file"} for peer in load_peers(root)], ensure_ascii=False, indent=2))
         else:

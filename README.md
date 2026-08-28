@@ -30,7 +30,7 @@ memento doctor
 memento mcp
 memento serve-http
 memento node show|set
-memento tasks list|run
+memento tasks list|approve|run
 memento inbox list|ack
 ```
 
@@ -213,6 +213,116 @@ repite cada 30 segundos. Cambie el intervalo con
 remotos requieren HTTPS; HTTP se acepta únicamente para localhost. Los
 snapshots tienen un límite predeterminado de 8 MiB configurable con
 `MEMENTO_PEER_MAX_BYTES`.
+
+### Dos nodos Docker para pruebas manuales
+
+El repositorio incluye una topología de prueba con `memento-a` y `memento-b`.
+Los dos contenedores quedan publicados **sólo en localhost** (`8781` y `8782`),
+en una red Docker privada. No la uses como despliegue público.
+
+```bash
+./docker/two-nodes/up.sh
+```
+
+El script crea cuatro tokens aleatorios en `.memento-docker-secrets/`, carpeta
+ignorada por Git, y arranca ambos nodos. Cada token pertenece a un usuario:
+
+- `a-admin.token` y `b-admin.token`: administradores de sus respectivos nodos.
+- `a-peer-b.token` y `b-peer-a.token`: lectores restringidos al proyecto
+  `equipo`, usados exclusivamente entre peers.
+
+Verificá que ambos nodos estén vivos:
+
+```bash
+curl http://127.0.0.1:8781/health
+curl http://127.0.0.1:8782/health
+docker compose -f docker-compose.two-nodes.yml logs -f
+```
+
+La red privada usa HTTP entre contenedores sólo para esta demo. La excepción se
+declara por peer en los archivos de bootstrap; fuera de Docker, Memento sigue
+exigiendo HTTPS para cualquier peer remoto.
+
+Para crear una tarea en A dirigida a B, cargá el token de A sin imprimirlo:
+
+```bash
+TOKEN_A=$(tr -d '\r\n' < .memento-docker-secrets/a-admin.token)
+curl -fsS http://127.0.0.1:8781/mcp \
+  -H "Authorization: Bearer $TOKEN_A" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_create","arguments":{"executor":"memento-b","project":"equipo","trigger":{"type":"event","filters":{"tags_all":["topic:refunds"]}},"action":{"type":"notify","title":"Nueva información","message":"Revisar refunds"}}}}'
+```
+
+Esperá unos segundos y aprobala localmente en B (la aprobación nunca se
+replica de forma automática):
+
+```bash
+docker compose -f docker-compose.two-nodes.yml exec memento-b \
+  memento tasks list --root /data
+docker compose -f docker-compose.two-nodes.yml exec memento-b \
+  memento tasks approve TASK_ID --root /data
+```
+
+La aprobación es local y no se replica de forma automática: una tarea recibida
+no puede autoautorizarse.
+
+Para simular una caída de B, detenelo, registrá una actividad en A mediante
+`activity_add`, y volvé a iniciarlo. Al reconectar, B sincroniza, evalúa la
+tarea y deja una única notificación en `/data/tasks/inbox`:
+
+```bash
+docker compose -f docker-compose.two-nodes.yml stop memento-b
+curl -fsS http://127.0.0.1:8781/mcp \
+  -H "Authorization: Bearer $TOKEN_A" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"activity_add","arguments":{"project":"equipo","action":"Evento mientras B estaba offline","details":"Prueba de reconexión","tags":["topic:refunds"]}}}'
+docker compose -f docker-compose.two-nodes.yml start memento-b
+docker compose -f docker-compose.two-nodes.yml exec memento-b \
+  memento inbox list --root /data
+```
+
+Para apagar el laboratorio sin borrar la memoria de prueba:
+
+```bash
+docker compose -f docker-compose.two-nodes.yml down
+```
+
+Para empezar de cero, eliminá explícitamente los volúmenes de Compose y la
+carpeta `.memento-docker-secrets/`.
+
+### Panel web local
+
+Memento Console simplifica las pruebas manuales de los nodos Docker. Permite
+cargar por separado la URL y el token de A y B, consultar actividades, tareas,
+inbox y peers, forzar una sincronización, registrar una actividad y aprobar
+una tarea recibida.
+
+Los tokens nunca se guardan en el proyecto, `localStorage` ni en la imagen: se
+mantienen solamente en memoria hasta que cerrás o recargás la pestaña.
+
+El comando de arranque inicia también el panel local:
+
+```bash
+./docker/two-nodes/up.sh
+```
+
+Abrí `http://127.0.0.1:3000`. El contenedor de la UI carga automáticamente los tokens de administrador de A y B desde
+`.memento-docker-secrets/`, que está ignorada por Git. No los persiste en
+`localStorage` ni los incluye en el código fuente. El Compose habilita ese
+origen local, pero no habilita orígenes públicos; el puerto del panel está
+ligado solamente a `127.0.0.1`.
+
+Para pedir información entre nodos, seleccioná A y usá **Solicitud entre
+nodos**. La tarea llega a B, donde debe aprobarse antes de ejecutarse. Luego,
+desde B usá **Responder una solicitud** con el `task_id`: la respuesta se
+guarda como actividad con un tag `request:<task_id>` y se replica como evento
+hacia A. En A, **Ver respuestas recibidas** muestra esas respuestas.
+
+Si sólo necesitás encontrar información que B ya guardó, no crees una tarea:
+seleccioná A y usá **Búsqueda directa**. La consulta llega a B con el token de
+peer autorizado y devuelve resultados de sus memorias sin importarlos,
+replicarlos ni modificar el contenido de ninguno de los nodos. B debe estar
+online para responder la búsqueda.
 
 Prueba E2E real con dos procesos, apagado y dos reinicios de B:
 
